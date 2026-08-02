@@ -1,0 +1,2 @@
+# Give the unprivileged service account access to PTP hardware clocks.
+SUBSYSTEM=="ptp", KERNEL=="ptp[0-9]*", GROUP="beagleptp", MODE="0660"

@@ -1,0 +1,46 @@
+[Unit]
+Description=BeaglePTP precision timing instrument
+Documentation=http://localhost:8080/api/docs
+After=network-online.target gpsd.socket chrony.service
+Wants=network-online.target
+Conflicts=ptp4l.service phc2sys.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=beagleptp
+Group=beagleptp
+EnvironmentFile=-/etc/beagleptp/beagleptp.env
+ExecStart=/opt/beagleptp/venv/bin/beagleptp serve --host 0.0.0.0 --port 8080 --interface eth0 --ptp-device /dev/ptp0 --database /var/lib/beagleptp/beagleptp.sqlite3 --runtime-dir /run/beagleptp --start analyzer
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+RuntimeDirectory=beagleptp
+StateDirectory=beagleptp
+UMask=0077
+
+# linuxptp needs raw Ethernet, timestamp configuration and clock adjustment.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_TIME CAP_SYS_NICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_TIME CAP_SYS_NICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+SystemCallArchitectures=native
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/run/beagleptp /var/lib/beagleptp
+DevicePolicy=closed
+DeviceAllow=/dev/ptp0 rw
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+# BeaglePTP GPSD configuration. USB receivers are attached automatically by udev.
+START_DAEMON="true"
+USBAUTO="true"
+DEVICES=""
+GPSD_OPTIONS="-n"
