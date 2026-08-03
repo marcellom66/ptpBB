@@ -68,7 +68,8 @@ def create_app(
     allow_poweroff: bool | None = None,
     poweroff_delay_seconds: float = 1.0,
 ) -> FastAPI:
-    token = api_token if api_token is not None else os.getenv("BEAGLEPTP_API_TOKEN")
+    configured_token = api_token if api_token is not None else os.getenv("BEAGLEPTP_API_TOKEN")
+    token = configured_token.strip() if configured_token and configured_token.strip() else None
     poweroff_enabled = (
         allow_poweroff
         if allow_poweroff is not None
@@ -100,7 +101,8 @@ def create_app(
 
     def instrument_status() -> dict[str, object]:
         result = engine.status()
-        result["poweroff_available"] = poweroff_enabled and token is not None
+        result["authentication_required"] = token is not None
+        result["poweroff_available"] = poweroff_enabled
         result["poweroff_scheduled"] = poweroff_scheduled
         return result
 
@@ -169,11 +171,6 @@ def create_app(
     ) -> dict[str, object]:
         del body  # Validation of the literal confirmation is the deliberate safety gate.
         nonlocal poweroff_scheduled
-        if token is None:
-            raise HTTPException(
-                status_code=503,
-                detail="power-off requires BEAGLEPTP_API_TOKEN",
-            )
         if not poweroff_enabled:
             raise HTTPException(
                 status_code=503,

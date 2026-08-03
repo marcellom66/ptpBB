@@ -75,6 +75,7 @@ def test_poweroff_requires_token_policy_and_exact_confirmation(tmp_path: Path) -
             == 422
         )
         status = client.get("/api/status", headers=headers).json()
+        assert status["authentication_required"] is True
         assert status["poweroff_available"] is True
         with client.websocket_connect(
             "/api/live", subprotocols=["beagleptp", "secret"]
@@ -89,6 +90,39 @@ def test_poweroff_requires_token_policy_and_exact_confirmation(tmp_path: Path) -
         assert response.json()["accepted"] is True
         assert calls == ["poweroff"]
         assert client.post(endpoint, headers=headers, json={"confirmation": "SPEGNI"}).status_code == 409
+
+
+def test_usb_only_mode_needs_no_token_and_keeps_safe_poweroff(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    async def fake_poweroff() -> None:
+        calls.append("poweroff")
+
+    engine = InstrumentEngine(
+        InstrumentConfig(
+            database_path=str(tmp_path / "usb-only.sqlite3"),
+            runtime_dir=str(tmp_path / "run"),
+        )
+    )
+    with TestClient(
+        create_app(
+            engine,
+            api_token="",
+            poweroff_handler=fake_poweroff,
+            allow_poweroff=True,
+            poweroff_delay_seconds=0,
+        )
+    ) as client:
+        status = client.get("/api/status")
+        assert status.status_code == 200
+        assert status.json()["authentication_required"] is False
+        assert status.json()["poweroff_available"] is True
+        response = client.post(
+            "/api/system/poweroff",
+            json={"confirmation": "SPEGNI"},
+        )
+        assert response.status_code == 202
+        assert calls == ["poweroff"]
 
 
 def test_poweroff_is_disabled_without_explicit_service_policy(tmp_path: Path) -> None:

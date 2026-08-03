@@ -64,9 +64,10 @@ utente.
 - Ripristino di campioni, allarmi e policy dopo un riavvio.
 - Export CSV e report JSON.
 - Dashboard responsiva multi-pagina e aggiornamenti live via WebSocket.
-- API protetta da bearer token e documentazione OpenAPI incorporata.
-- Spegnimento sicuro dalla dashboard con autenticazione, conferma digitata e
-  autorizzazione Polkit limitata al solo power-off.
+- API senza login sulla sola interfaccia USB `192.168.7.2`; bearer token
+  opzionale se si modifica volontariamente l'esposizione di rete.
+- Spegnimento sicuro dalla dashboard con conferma digitata e autorizzazione
+  Polkit limitata al solo power-off.
 - Monitor GPSD per ricevitori GNSS USB auto-rilevati.
 - Chrony configurato con sole sorgenti locali GNSS/PPS, senza pool NTP pubblici.
 - Stato di integrità `TRUSTED`, `DEGRADED`, `HOLDOVER` o `UNTRUSTED`.
@@ -325,7 +326,7 @@ Lo script:
 1. installa `linuxptp`, `ethtool`, Python, GPSD, Chrony, PPS tools e Polkit;
 2. crea l'utente di servizio non-login `beagleptp`;
 3. installa il virtual environment in `/opt/beagleptp/venv`;
-4. crea un bearer token casuale;
+4. vincola la dashboard all'indirizzo USB `192.168.7.2`, senza token;
 5. configura permessi PHC e directory persistenti;
 6. configura GPSD USB auto-discovery;
 7. sostituisce i pool NTP con soli refclock GNSS/PPS locali;
@@ -394,8 +395,9 @@ Procedura:
 5. solo a quel punto scollegare l'alimentazione.
 
 Lo spegnimento non è un comando shell generico. L'endpoint accetta soltanto un
-payload fisso, richiede il bearer token e funziona esclusivamente quando
-`BEAGLEPTP_ALLOW_POWEROFF=1`. La regola Polkit concede all'utente non-login
+payload fisso con conferma esatta `SPEGNI` e funziona esclusivamente quando
+`BEAGLEPTP_ALLOW_POWEROFF=1`. La dashboard predefinita ascolta solamente
+sull'indirizzo USB `192.168.7.2`. La regola Polkit concede all'utente non-login
 `beagleptp` solamente le azioni logind `power-off`; non concede `sudo`, reboot o
 gestione arbitraria delle unità systemd.
 
@@ -525,25 +527,37 @@ Endpoint principali:
 | `PUT` | `/api/config` | Configurazione persistente, solo IDLE |
 | `POST` | `/api/start` | Avvio modalità |
 | `POST` | `/api/stop` | Arresto misura |
-| `POST` | `/api/system/poweroff` | Spegnimento sicuro, token e conferma `SPEGNI` obbligatori |
+| `POST` | `/api/system/poweroff` | Spegnimento sicuro con conferma `SPEGNI` obbligatoria |
 | `POST` | `/api/alarms/{code}/acknowledge` | Acknowledge allarme |
 | `GET` | `/api/pmc/{management_id}` | Query PMC allow-listed |
 | `WS` | `/api/live` | Sample, allarmi, log, eventi e stato live |
 
-Con token configurato, REST richiede:
+Nell'installazione USB predefinita non viene richiesto un token. Il servizio è
+vincolato a:
+
+```text
+http://192.168.7.2:8080
+```
+
+Un bearer token resta disponibile come protezione opzionale se l'operatore
+modifica consapevolmente il servizio per esporlo su un'altra rete. Con token
+configurato, REST richiede:
 
 ```http
 Authorization: Bearer <token>
 ```
 
-Il WebSocket autentica l'handshake mediante il sottoprotocollo `beagleptp` e il
-token, evitando di inserire credenziali nell'URL e nei normali access log. L'API
-non accetta comandi shell o argomenti arbitrari.
+Il WebSocket autentica l'handshake mediante il sottoprotocollo `beagleptp` quando
+il token opzionale è configurato, evitando di inserire credenziali nell'URL e
+nei normali access log. L'API non accetta comandi shell o argomenti arbitrari.
 
-Lettura del token sul dispositivo:
+Per abilitare volontariamente un token:
 
 ```sh
-sudo grep '^BEAGLEPTP_API_TOKEN=' /etc/beagleptp/beagleptp.env
+sudo sed -i \
+  "s/^BEAGLEPTP_API_TOKEN=.*/BEAGLEPTP_API_TOKEN=$(openssl rand -hex 32)/" \
+  /etc/beagleptp/beagleptp.env
+sudo systemctl restart beagleptp
 ```
 
 ## Persistenza e file di sistema
@@ -554,7 +568,7 @@ sudo grep '^BEAGLEPTP_API_TOKEN=' /etc/beagleptp/beagleptp.env
 | `/opt/beagleptp/venv` | Installazione Python eseguita dal servizio |
 | `/var/lib/beagleptp/beagleptp.sqlite3` | Campioni, eventi, allarmi e settings |
 | `/run/beagleptp` | Socket UDS e configurazione runtime `ptp4l` |
-| `/etc/beagleptp/beagleptp.env` | Bearer token e ambiente servizio |
+| `/etc/beagleptp/beagleptp.env` | Ambiente servizio e token opzionale |
 | `/etc/systemd/system/beagleptp.service` | Unità di boot |
 | `/etc/polkit-1/rules.d/60-beagleptp-poweroff.rules` | Autorizzazione limitata al power-off |
 | `/etc/default/gpsd` | Auto-discovery GPSD |
@@ -587,8 +601,8 @@ L'unità `systemd` include:
 - directory scrivibili limitate a runtime e database;
 - umask restrittiva;
 - restart controllato e limite ai tentativi.
-- spegnimento remoto disabilitato per impostazione applicativa se manca il token
-  o `BEAGLEPTP_ALLOW_POWEROFF=1`;
+- dashboard vincolata all'indirizzo USB `192.168.7.2` nell'unità predefinita;
+- spegnimento remoto disabilitato se `BEAGLEPTP_ALLOW_POWEROFF` non vale `1`;
 - policy Polkit ristretta alle sole azioni logind di power-off per l'utente
   `beagleptp`.
 
@@ -609,9 +623,10 @@ unità separate per Analyzer e Grandmaster.
 - aggiungere aggiornamenti firmati, secure/measured boot e recovery;
 - inviare audit e log a un sistema remoto protetto.
 
-Il bearer token su HTTP protegge dall'accesso casuale, ma non cifra il traffico.
-È accettabile solamente su collegamento locale/isolato; non è sufficiente su una
-rete ostile.
+Il collegamento USB senza token presuppone accesso fisico controllato al MacBook
+e alla BeagleBone. Se la dashboard viene esposta su Ethernet o Wi-Fi, abilitare
+almeno il bearer token; un token su HTTP protegge dall'accesso casuale ma non
+cifra il traffico e non è sufficiente su una rete ostile.
 
 ## Limiti hardware e metrologici
 
@@ -708,22 +723,28 @@ sudo journalctl -u beagleptp -b --no-pager
 ss -ltn | grep ':8080'
 ```
 
-### Token non trovato
+### La dashboard richiede ancora il vecchio token
 
 ```sh
-sudo grep '^BEAGLEPTP_API_TOKEN=' /etc/beagleptp/beagleptp.env
+sudo sed -i 's/^BEAGLEPTP_API_TOKEN=.*/BEAGLEPTP_API_TOKEN=/' \
+  /etc/beagleptp/beagleptp.env
+sudo systemctl restart beagleptp
 ```
+
+Ricaricare la pagina. Quando `/api/status` comunica che l'autenticazione è
+disattivata, la dashboard elimina automaticamente il token precedentemente
+salvato dal browser.
 
 ### Pulsante SPEGNI disabilitato o spegnimento rifiutato
 
 ```sh
-sudo grep -E '^BEAGLEPTP_(API_TOKEN|ALLOW_POWEROFF)=' \
+sudo grep '^BEAGLEPTP_ALLOW_POWEROFF=' \
   /etc/beagleptp/beagleptp.env
 test -r /etc/polkit-1/rules.d/60-beagleptp-poweroff.rules && echo policy-present
 sudo journalctl -u beagleptp -b --no-pager
 ```
 
-Devono essere presenti un token non vuoto e:
+Deve essere presente:
 
 ```text
 BEAGLEPTP_ALLOW_POWEROFF=1

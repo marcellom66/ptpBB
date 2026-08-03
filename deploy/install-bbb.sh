@@ -40,11 +40,10 @@ fi
 install -d -o beagleptp -g beagleptp -m 0750 /var/lib/beagleptp
 install -d -o root -g beagleptp -m 0750 /etc/beagleptp
 if [ ! -e /etc/beagleptp/beagleptp.env ]; then
-    token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
-    printf 'BEAGLEPTP_API_TOKEN=%s\n' "$token" > /etc/beagleptp/beagleptp.env
+    printf 'BEAGLEPTP_API_TOKEN=\n' > /etc/beagleptp/beagleptp.env
     chmod 0640 /etc/beagleptp/beagleptp.env
     chown root:beagleptp /etc/beagleptp/beagleptp.env
-    echo "API token written to /etc/beagleptp/beagleptp.env"
+    echo "API authentication disabled for the USB-only dashboard"
 fi
 if grep -q '^BEAGLEPTP_ALLOW_POWEROFF=' /etc/beagleptp/beagleptp.env; then
     sed -i 's/^BEAGLEPTP_ALLOW_POWEROFF=.*/BEAGLEPTP_ALLOW_POWEROFF=1/' \
