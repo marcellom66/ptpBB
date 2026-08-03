@@ -195,7 +195,7 @@ def create_app(
         limit: Annotated[int, Query(ge=1, le=20_000)] = 300,
         _: None = Depends(authorize),
     ) -> list[dict[str, object]]:
-        return [sample.to_dict() for sample in list(engine.samples)[-limit:]]
+        return [sample.to_dict() for sample in engine.session_samples(limit)]
 
     @app.get("/api/report")
     async def report(

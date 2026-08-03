@@ -55,6 +55,30 @@ async def test_alarm_lifecycle(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_window_excludes_history_and_invalid_master_samples(tmp_path: Path) -> None:
+    engine = InstrumentEngine(
+        InstrumentConfig(
+            database_path=str(tmp_path / "session.sqlite3"),
+            runtime_dir=str(tmp_path / "run"),
+        )
+    )
+    await engine.add_sample(PtpSample(1, 25, source="simulator"))
+    engine.session_started_ns = 10
+    await engine.add_sample(PtpSample(11, 30, source="simulator"))
+    assert [sample.timestamp_ns for sample in engine.session_samples()] == [11]
+
+    engine.ptp_wire.snapshot = lambda: {  # type: ignore[method-assign]
+        "signal_present": True,
+        "timestamp_received": True,
+        "utc_time_valid": False,
+    }
+    await engine._on_process_line("master offset 1785443765447332136 s0 freq +1 path delay 2")
+    assert engine.status()["rejected_ptp_samples"] == 1
+    assert len(engine.session_samples()) == 1
+    await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_integrity_and_persistent_source_policy(tmp_path: Path) -> None:
     database = str(tmp_path / "integrity.sqlite3")
     engine = InstrumentEngine(

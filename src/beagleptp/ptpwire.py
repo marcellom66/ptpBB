@@ -243,6 +243,22 @@ class PtpWireMonitor:
         )
         utc_offset = properties.get("current_utc_offset")
         utc_ns = raw_ns - int(utc_offset) * 1_000_000_000 if can_convert_utc else None
+        utc_plausible = bool(
+            utc_ns is not None
+            and 946_684_800_000_000_000 <= utc_ns < 4_102_444_800_000_000_000
+        )
+        validation_reasons: list[str] = []
+        if raw_ns is None:
+            validation_reasons.append("no Sync/Follow_Up timestamp has been received")
+        if raw_ns is not None and not properties.get("ptp_timescale"):
+            validation_reasons.append("master does not assert the PTP timescale")
+        if raw_ns is not None and not properties.get("utc_offset_valid"):
+            validation_reasons.append("master does not assert a valid UTC offset")
+        if raw_ns is not None and not properties.get("time_traceable"):
+            validation_reasons.append("master time is not traceable")
+        if utc_ns is not None and not utc_plausible:
+            validation_reasons.append("converted UTC is outside the supported 2000-2100 range")
+        utc_time_valid = bool(can_convert_utc and properties.get("time_traceable") and utc_plausible)
         last_packet = self._last_packet or {}
         return {
             "available": self.error is None,
@@ -267,6 +283,9 @@ class PtpWireMonitor:
             "utc_time_ns": utc_ns,
             "utc_time": _iso8601_ns(utc_ns),
             "utc_conversion_valid": can_convert_utc,
+            "utc_time_plausible": utc_plausible,
+            "utc_time_valid": utc_time_valid,
+            "validation_reasons": validation_reasons,
             "current_utc_offset": utc_offset,
             "ptp_timescale": properties.get("ptp_timescale"),
             "utc_offset_valid": properties.get("utc_offset_valid"),

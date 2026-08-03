@@ -182,6 +182,18 @@ visibile il valore PTP grezzo e la conversione UTC viene marcata non valida. Un
 segnale su un dominio differente viene contato, ma non viene usato come orario
 del profilo configurato.
 
+Per essere ammesso alle metriche metrologiche, il tempo deve inoltre essere
+`timeTraceable` e produrre una data UTC plausibile nell'intervallo 2000-2100. I
+campioni provenienti da un master con epoca azzerata, non tracciabile o non
+plausibile vengono conteggiati come `REJECTED`, generano l'allarme
+`PTP_MASTER_TIME_INVALID` e non alimentano TE, RMS, percentili, MTIE/TDEV o
+grafici. Il timestamp grezzo resta visibile per la diagnosi del master.
+
+Ogni avvio di Analyzer, Slave, Grandmaster o Simulator apre una nuova finestra
+di sessione. Dashboard, report ed export usano solamente i campioni della
+sessione corrente, evitando di mescolare simulatore, acquisizioni precedenti e
+nuovi collegamenti PTP.
+
 ### Time Error
 
 - Grafico TE con maschera warning/critical.

@@ -108,6 +108,9 @@ def test_monitor_converts_ptp_timescale_to_utc() -> None:
     assert result["packet_count"] == 2
     assert result["matching_packet_count"] == 2
     assert result["utc_conversion_valid"] is True
+    assert result["utc_time_plausible"] is True
+    assert result["utc_time_valid"] is True
+    assert result["validation_reasons"] == []
     assert result["raw_ptp_time_ns"] == 1_800_000_037_123_456_789
     assert result["utc_time_ns"] == 1_800_000_000_123_456_789
     assert result["raw_ptp_time"].endswith(".123456789Z")
@@ -128,3 +131,22 @@ def test_monitor_reports_wrong_domain_without_using_its_timestamp() -> None:
     assert result["last_packet_domain"] == 7
     assert result["domain_matches"] is False
     assert result["timestamp_received"] is False
+
+
+def test_monitor_rejects_untraceable_epoch_timestamp() -> None:
+    monitor = PtpWireMonitor("eth0", expected_domain=127)
+    flags = FLAG_UTC_OFFSET_VALID | FLAG_PTP_TIMESCALE
+    announce = ptp_message(ANNOUNCE, domain=127, flags=flags)
+    announce[44:46] = (37).to_bytes(2, "big", signed=True)
+    follow_up = ptp_message(FOLLOW_UP, domain=127, flags=FLAG_TWO_STEP)
+    follow_up[34:44] = timestamp_bytes(183, 250_000_000)
+
+    monitor.ingest(ethernet_frame(announce))
+    monitor.ingest(ethernet_frame(follow_up))
+    result = monitor.snapshot()
+
+    assert result["utc_conversion_valid"] is True
+    assert result["utc_time_plausible"] is False
+    assert result["utc_time_valid"] is False
+    assert "master time is not traceable" in result["validation_reasons"]
+    assert any("2000-2100" in reason for reason in result["validation_reasons"])

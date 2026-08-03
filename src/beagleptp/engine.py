@@ -32,6 +32,7 @@ class InstrumentEngine:
         self._load_persisted_config()
         self.mode = InstrumentMode.IDLE
         self.started_ns: int | None = None
+        self.session_started_ns: int | None = None
         self.samples: deque[PtpSample] = deque(maxlen=config.sample_retention)
         self.alarms: dict[str, Alarm] = {}
         self.log: deque[dict[str, Any]] = deque(maxlen=1_000)
@@ -54,6 +55,8 @@ class InstrumentEngine:
         self._integrity_state = "UNTRUSTED"
         self._integrity_since_ns = time.time_ns()
         self._last_reference_monotonic: float | None = None
+        self._rejected_ptp_samples = 0
+        self._last_rejected_ptp_sample: dict[str, Any] | None = None
 
     def _load_persisted_config(self) -> None:
         raw = self.store.load_setting("instrument_config")
@@ -133,6 +136,9 @@ class InstrumentEngine:
                 raise ValueError("cannot start idle mode")
             self.mode = mode
             self.started_ns = time.time_ns()
+            self.session_started_ns = self.started_ns
+            self._rejected_ptp_samples = 0
+            self._last_rejected_ptp_sample = None
             try:
                 if mode == InstrumentMode.SIMULATOR:
                     self._simulator_task = asyncio.create_task(
@@ -144,6 +150,15 @@ class InstrumentEngine:
                 self.mode = InstrumentMode.IDLE
                 self.started_ns = None
                 raise
+            for code in (
+                "OFFSET_CRITICAL",
+                "OFFSET_WARNING",
+                "PATH_DELAY_WARNING",
+                "TIME_STEP",
+                "PTP_SEQUENCE_GAP",
+                "GM_CHANGED",
+            ):
+                await self._clear_alarm(code)
             await self._event("mode", f"started {mode.value}")
 
     async def stop(self) -> None:
@@ -221,6 +236,7 @@ class InstrumentEngine:
 
     async def _evaluate_source_health(self) -> None:
         gps = self.gps.snapshot()
+        wire = self.ptp_wire.snapshot()
         if self.config.gps_enabled and not gps["daemon_connected"]:
             await self._raise_alarm("GPSD_UNAVAILABLE", "warning", "GPS daemon is not reachable")
         else:
@@ -261,6 +277,18 @@ class InstrumentEngine:
         else:
             await self._clear_alarm("PTP_DATA_STALE")
 
+        if wire["signal_present"] and wire["timestamp_received"] and not wire["utc_time_valid"]:
+            reason = "; ".join(wire["validation_reasons"]) or "invalid master timestamp"
+            await self._raise_alarm(
+                "PTP_MASTER_TIME_INVALID",
+                "critical",
+                f"PTP master time rejected: {reason}",
+            )
+            for code in ("OFFSET_CRITICAL", "OFFSET_WARNING", "TIME_STEP"):
+                await self._clear_alarm(code)
+        else:
+            await self._clear_alarm("PTP_MASTER_TIME_INVALID")
+
         integrity = self.integrity_status()
         new_state = str(integrity["state"])
         if new_state != self._integrity_state:
@@ -299,7 +327,17 @@ class InstrumentEngine:
     async def _on_process_line(self, line: str) -> None:
         self.log.append({"timestamp_ns": time.time_ns(), "line": line})
         if sample := self.parser.parse(line):
-            await self.add_sample(sample)
+            wire = self.ptp_wire.snapshot()
+            if (
+                sample.source == "ptp4l"
+                and wire["signal_present"]
+                and wire["timestamp_received"]
+                and not wire["utc_time_valid"]
+            ):
+                self._rejected_ptp_samples += 1
+                self._last_rejected_ptp_sample = sample.to_dict()
+            else:
+                await self.add_sample(sample)
         await self._publish({"type": "log", "data": line})
 
     async def add_sample(self, sample: PtpSample) -> None:
@@ -314,13 +352,17 @@ class InstrumentEngine:
         thresholds = self.config.thresholds
         if magnitude >= thresholds.offset_critical_ns:
             await self._raise_alarm(
-                "OFFSET_CRITICAL", "critical", f"Offset {sample.offset_ns:.1f} ns exceeds critical limit"
+                "OFFSET_CRITICAL",
+                "critical",
+                f"Offset {self._format_duration_ns(sample.offset_ns)} exceeds critical limit",
             )
         else:
             await self._clear_alarm("OFFSET_CRITICAL")
         if thresholds.offset_warning_ns <= magnitude < thresholds.offset_critical_ns:
             await self._raise_alarm(
-                "OFFSET_WARNING", "warning", f"Offset {sample.offset_ns:.1f} ns exceeds warning limit"
+                "OFFSET_WARNING",
+                "warning",
+                f"Offset {self._format_duration_ns(sample.offset_ns)} exceeds warning limit",
             )
         else:
             await self._clear_alarm("OFFSET_WARNING")
@@ -363,10 +405,11 @@ class InstrumentEngine:
             await self._clear_alarm("GM_CHANGED")
 
         if previous and abs(sample.offset_ns - previous.offset_ns) >= self.config.time_step_warning_ns:
+            difference = sample.offset_ns - previous.offset_ns
             await self._raise_alarm(
                 "TIME_STEP",
                 "critical",
-                f"Time Error changed by {sample.offset_ns - previous.offset_ns:.1f} ns",
+                f"Time Error changed by {self._format_duration_ns(difference)}",
             )
         else:
             await self._clear_alarm("TIME_STEP")
@@ -385,6 +428,21 @@ class InstrumentEngine:
     @staticmethod
     def _normalize_clock_id(value: str | None) -> str:
         return "".join(character for character in (value or "").lower() if character.isalnum())
+
+    @staticmethod
+    def _format_duration_ns(value: float) -> str:
+        magnitude = abs(value)
+        for scale, unit, digits in (
+            (86_400_000_000_000, "d", 3),
+            (3_600_000_000_000, "h", 3),
+            (60_000_000_000, "min", 3),
+            (1_000_000_000, "s", 6),
+            (1_000_000, "ms", 3),
+            (1_000, "us", 3),
+        ):
+            if magnitude >= scale:
+                return f"{value / scale:.{digits}f} {unit}"
+        return f"{value:.1f} ns"
 
     async def _raise_alarm(self, code: str, severity: str, message: str) -> None:
         now = time.time_ns()
@@ -446,9 +504,18 @@ class InstrumentEngine:
     def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
         self._subscribers.discard(queue)
 
+    def session_samples(self, limit: int | None = None) -> list[PtpSample]:
+        samples = list(self.samples)
+        if self.session_started_ns is not None:
+            samples = [sample for sample in samples if sample.timestamp_ns >= self.session_started_ns]
+        if limit:
+            samples = samples[-limit:]
+        return samples
+
     def status(self) -> dict[str, Any]:
         now = time.time_ns()
-        last_sample = self.samples[-1] if self.samples else None
+        session_samples = self.session_samples()
+        last_sample = session_samples[-1] if session_samples else None
         return {
             "mode": self.mode.value,
             "system_time_ns": now,
@@ -468,7 +535,9 @@ class InstrumentEngine:
             "time_step_warning_ns": self.config.time_step_warning_ns,
             "thresholds": asdict(self.config.thresholds),
             "boot_managed": "INVOCATION_ID" in os.environ,
-            "sample_count": len(self.samples),
+            "sample_count": len(session_samples),
+            "rejected_ptp_samples": self._rejected_ptp_samples,
+            "last_rejected_ptp_sample": self._last_rejected_ptp_sample,
             "last_sample": last_sample.to_dict() if last_sample else None,
             "active_alarms": sum(alarm.active for alarm in self.alarms.values()),
             "processes": {name: process.running for name, process in self.backend.processes.items()},
@@ -479,13 +548,16 @@ class InstrumentEngine:
         }
 
     def _last_sample_age_seconds(self) -> float | None:
-        if not self.samples:
+        samples = self.session_samples()
+        if not samples:
             return None
-        return max(0.0, (time.time_ns() - self.samples[-1].timestamp_ns) / 1e9)
+        return max(0.0, (time.time_ns() - samples[-1].timestamp_ns) / 1e9)
 
     def integrity_status(self) -> dict[str, Any]:
         gps = self.gps.snapshot()
-        sample = self.samples[-1] if self.samples else None
+        wire = self.ptp_wire.snapshot()
+        samples = self.session_samples()
+        sample = samples[-1] if samples else None
         sample_age = self._last_sample_age_seconds()
         ptp_current = bool(
             sample
@@ -528,7 +600,10 @@ class InstrumentEngine:
                 reasons.append("PTP measurements are not current")
         else:
             state = "UNTRUSTED"
-            reasons.append("No current trusted timing source")
+            if wire["signal_present"] and wire["timestamp_received"] and not wire["utc_time_valid"]:
+                reasons.append("PTP is present but the master time is invalid or untraceable")
+            else:
+                reasons.append("No current trusted timing source")
 
         uncertainty_ns: float | None = None
         if gps["pps_fresh"]:
@@ -602,9 +677,7 @@ class InstrumentEngine:
         return self.status()
 
     def report(self, limit: int | None = None) -> dict[str, Any]:
-        samples = list(self.samples)
-        if limit:
-            samples = samples[-limit:]
+        samples = self.session_samples(limit)
         return {
             "generated_ns": time.time_ns(),
             "instrument": self.status(),
@@ -620,9 +693,7 @@ class InstrumentEngine:
         return json.dumps(self.report(limit), indent=2, default=str)
 
     def export_csv(self, limit: int | None = None) -> str:
-        samples = list(self.samples)
-        if limit:
-            samples = samples[-limit:]
+        samples = self.session_samples(limit)
         stream = io.StringIO()
         writer = csv.writer(stream)
         writer.writerow(
