@@ -27,6 +27,7 @@ utente.
 - [Installazione di sviluppo](#installazione-di-sviluppo)
 - [Installazione sul BeagleBone Black](#installazione-sul-beaglebone-black)
 - [Avvio automatico](#avvio-automatico)
+- [Spegnimento sicuro dalla dashboard](#spegnimento-sicuro-dalla-dashboard)
 - [GPS/GNSS USB e PPS](#gpsgnss-usb-e-pps)
 - [Profili PTP](#profili-ptp)
 - [API e WebSocket](#api-e-websocket)
@@ -64,6 +65,8 @@ utente.
 - Export CSV e report JSON.
 - Dashboard responsiva multi-pagina e aggiornamenti live via WebSocket.
 - API protetta da bearer token e documentazione OpenAPI incorporata.
+- Spegnimento sicuro dalla dashboard con autenticazione, conferma digitata e
+  autorizzazione Polkit limitata al solo power-off.
 - Monitor GPSD per ricevitori GNSS USB auto-rilevati.
 - Chrony configurato con sole sorgenti locali GNSS/PPS, senza pool NTP pubblici.
 - Stato di integrità `TRUSTED`, `DEGRADED`, `HOLDOVER` o `UNTRUSTED`.
@@ -165,7 +168,18 @@ http://192.168.7.2:8080
 - Stato e riferimento Chrony.
 - Grandmaster attivo, allow-list e autorizzazione.
 - Età del campione PTP e del riferimento.
+- Ultimo timestamp assoluto ricevuto nei messaggi `Sync`/`Follow_Up`.
+- Timestamp PTP grezzo, conversione UTC, scala temporale, `currentUtcOffset`,
+  tracciabilità, dominio, trasporto e conteggio pacchetti osservati.
 - Catena visuale GNSS → PPS → PTP → clock.
+
+Il riquadro **Received PTP time** non mostra l'orologio locale della BeagleBone:
+mostra l'ultimo timestamp trasportato sul filo dal master. Il timestamp grezzo è
+convertito in UTC solamente quando un messaggio `Announce` dello stesso dominio
+dichiara sia la scala PTP sia valido `currentUtcOffset`. In caso contrario resta
+visibile il valore PTP grezzo e la conversione UTC viene marcata non valida. Un
+segnale su un dominio differente viene contato, ma non viene usato come orario
+del profilo configurato.
 
 ### Time Error
 
@@ -308,7 +322,7 @@ sudo ./deploy/install-bbb.sh
 
 Lo script:
 
-1. installa `linuxptp`, `ethtool`, Python, GPSD, Chrony e PPS tools;
+1. installa `linuxptp`, `ethtool`, Python, GPSD, Chrony, PPS tools e Polkit;
 2. crea l'utente di servizio non-login `beagleptp`;
 3. installa il virtual environment in `/opt/beagleptp/venv`;
 4. crea un bearer token casuale;
@@ -316,7 +330,8 @@ Lo script:
 6. configura GPSD USB auto-discovery;
 7. sostituisce i pool NTP con soli refclock GNSS/PPS locali;
 8. salva la configurazione Chrony originale;
-9. abilita GPSD, Chrony e BeaglePTP al boot.
+9. installa la policy limitata per lo spegnimento sicuro dalla dashboard;
+10. abilita GPSD, Chrony e BeaglePTP al boot.
 
 Verifica hardware:
 
@@ -362,6 +377,47 @@ Arresto e riavvio:
 sudo systemctl stop beagleptp
 sudo systemctl restart beagleptp
 ```
+
+## Spegnimento sicuro dalla dashboard
+
+Il pulsante rosso `⏻ SPEGNI` è disponibile nella barra superiore della
+dashboard. Serve a terminare la misura, chiudere correttamente il database e
+richiedere a Linux un normale power-off prima di togliere l'alimentazione.
+
+Procedura:
+
+1. premere `⏻ SPEGNI`;
+2. leggere l'avviso e digitare esattamente `SPEGNI`;
+3. premere `Arresta il sistema`;
+4. attendere che la dashboard perda la connessione e che tutti i LED della
+   BeagleBone siano spenti;
+5. solo a quel punto scollegare l'alimentazione.
+
+Lo spegnimento non è un comando shell generico. L'endpoint accetta soltanto un
+payload fisso, richiede il bearer token e funziona esclusivamente quando
+`BEAGLEPTP_ALLOW_POWEROFF=1`. La regola Polkit concede all'utente non-login
+`beagleptp` solamente le azioni logind `power-off`; non concede `sudo`, reboot o
+gestione arbitraria delle unità systemd.
+
+Configurazione installata:
+
+```text
+/etc/beagleptp/beagleptp.env
+/etc/polkit-1/rules.d/60-beagleptp-poweroff.rules
+```
+
+Per disabilitare volontariamente il pulsante:
+
+```sh
+sudo sed -i 's/^BEAGLEPTP_ALLOW_POWEROFF=.*/BEAGLEPTP_ALLOW_POWEROFF=0/' \
+  /etc/beagleptp/beagleptp.env
+sudo systemctl restart beagleptp
+```
+
+Il tasto fisico POWER della BeagleBone e `sudo poweroff` da SSH rimangono
+alternative valide. Non togliere direttamente la tensione mentre Linux è in
+esecuzione, perché SQLite, filesystem e log potrebbero non essere stati ancora
+sincronizzati.
 
 ## GPS/GNSS USB e PPS
 
@@ -460,6 +516,7 @@ Endpoint principali:
 | `GET` | `/api/status` | Stato completo dello strumento |
 | `GET` | `/api/integrity` | Decisione di integrità temporale |
 | `GET` | `/api/gps` | Stato GPSD, fix, satelliti e PPS |
+| `GET` | `/api/ptp-time` | Timestamp PTP ricevuto, UTC e proprietà della scala temporale |
 | `GET` | `/api/doctor` | Self-test hardware/software |
 | `GET` | `/api/profiles` | Profili disponibili |
 | `GET` | `/api/samples?limit=N` | Campioni recenti |
@@ -468,6 +525,7 @@ Endpoint principali:
 | `PUT` | `/api/config` | Configurazione persistente, solo IDLE |
 | `POST` | `/api/start` | Avvio modalità |
 | `POST` | `/api/stop` | Arresto misura |
+| `POST` | `/api/system/poweroff` | Spegnimento sicuro, token e conferma `SPEGNI` obbligatori |
 | `POST` | `/api/alarms/{code}/acknowledge` | Acknowledge allarme |
 | `GET` | `/api/pmc/{management_id}` | Query PMC allow-listed |
 | `WS` | `/api/live` | Sample, allarmi, log, eventi e stato live |
@@ -478,8 +536,9 @@ Con token configurato, REST richiede:
 Authorization: Bearer <token>
 ```
 
-Il WebSocket usa il parametro `access_token`. L'API non accetta comandi shell o
-argomenti arbitrari.
+Il WebSocket autentica l'handshake mediante il sottoprotocollo `beagleptp` e il
+token, evitando di inserire credenziali nell'URL e nei normali access log. L'API
+non accetta comandi shell o argomenti arbitrari.
 
 Lettura del token sul dispositivo:
 
@@ -497,6 +556,7 @@ sudo grep '^BEAGLEPTP_API_TOKEN=' /etc/beagleptp/beagleptp.env
 | `/run/beagleptp` | Socket UDS e configurazione runtime `ptp4l` |
 | `/etc/beagleptp/beagleptp.env` | Bearer token e ambiente servizio |
 | `/etc/systemd/system/beagleptp.service` | Unità di boot |
+| `/etc/polkit-1/rules.d/60-beagleptp-poweroff.rules` | Autorizzazione limitata al power-off |
 | `/etc/default/gpsd` | Auto-discovery GPSD |
 | `/etc/chrony/chrony.conf` | Policy GNSS/PPS locale |
 | `/etc/chrony/chrony.conf.pre-beagleptp` | Backup configurazione Chrony Debian |
@@ -527,6 +587,10 @@ L'unità `systemd` include:
 - directory scrivibili limitate a runtime e database;
 - umask restrittiva;
 - restart controllato e limite ai tentativi.
+- spegnimento remoto disabilitato per impostazione applicativa se manca il token
+  o `BEAGLEPTP_ALLOW_POWEROFF=1`;
+- policy Polkit ristretta alle sole azioni logind di power-off per l'utente
+  `beagleptp`.
 
 Le capability `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SYS_TIME` e `CAP_SYS_NICE`
 sono necessarie alle modalità PTP reali. Ridurle ulteriormente richiederebbe
@@ -649,6 +713,24 @@ ss -ltn | grep ':8080'
 ```sh
 sudo grep '^BEAGLEPTP_API_TOKEN=' /etc/beagleptp/beagleptp.env
 ```
+
+### Pulsante SPEGNI disabilitato o spegnimento rifiutato
+
+```sh
+sudo grep -E '^BEAGLEPTP_(API_TOKEN|ALLOW_POWEROFF)=' \
+  /etc/beagleptp/beagleptp.env
+test -r /etc/polkit-1/rules.d/60-beagleptp-poweroff.rules && echo policy-present
+sudo journalctl -u beagleptp -b --no-pager
+```
+
+Devono essere presenti un token non vuoto e:
+
+```text
+BEAGLEPTP_ALLOW_POWEROFF=1
+```
+
+Se la policy è assente, rieseguire `sudo ./deploy/install-bbb.sh`. Non sostituire
+la policy con un'autorizzazione `sudo` generale per l'utente del servizio.
 
 ### Analyzer attivo ma nessun campione
 

@@ -18,6 +18,7 @@ from .hardware import probe_hardware
 from .linuxptp import LinuxPtpBackend
 from .models import PROFILES, Alarm, InstrumentConfig, InstrumentMode, PtpSample
 from .parsers import Ptp4lLogParser, parse_pmc_dataset
+from .ptpwire import PtpWireMonitor
 from .statistics import summarize
 from .store import SampleStore
 
@@ -43,7 +44,11 @@ class InstrumentEngine:
         self._lock = asyncio.Lock()
         self._random = random.Random(seed)
         self.gps = GpsdMonitor(config.gpsd_host, config.gpsd_port)
+        self.ptp_wire = PtpWireMonitor(
+            config.interface, expected_domain=config.selected_profile().domain
+        )
         self._gps_task: asyncio.Task[None] | None = None
+        self._ptp_wire_task: asyncio.Task[None] | None = None
         self._health_task: asyncio.Task[None] | None = None
         self._chrony: dict[str, Any] = {"available": False, "synchronized": False}
         self._integrity_state = "UNTRUSTED"
@@ -101,18 +106,23 @@ class InstrumentEngine:
             return
         if self.config.gps_enabled:
             self._gps_task = asyncio.create_task(self.gps.run(), name="beagleptp-gpsd")
+        self._ptp_wire_task = asyncio.create_task(
+            self.ptp_wire.run(), name="beagleptp-ptp-wire"
+        )
         self._health_task = asyncio.create_task(self._health_loop(), name="beagleptp-health")
 
     async def stop_monitoring(self) -> None:
         self.gps.stop()
-        for task in (self._gps_task, self._health_task):
+        self.ptp_wire.stop()
+        for task in (self._gps_task, self._ptp_wire_task, self._health_task):
             if task:
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (self._gps_task, self._health_task) if task),
+            *(task for task in (self._gps_task, self._ptp_wire_task, self._health_task) if task),
             return_exceptions=True,
         )
         self._gps_task = None
+        self._ptp_wire_task = None
         self._health_task = None
 
     async def start(self, mode: InstrumentMode) -> None:
@@ -463,6 +473,7 @@ class InstrumentEngine:
             "active_alarms": sum(alarm.active for alarm in self.alarms.values()),
             "processes": {name: process.running for name, process in self.backend.processes.items()},
             "gps": self.gps.snapshot(),
+            "ptp_wire": self.ptp_wire.snapshot(),
             "chrony": dict(self._chrony),
             "integrity": self.integrity_status(),
         }
@@ -578,6 +589,7 @@ class InstrumentEngine:
             if hasattr(self.config.thresholds, name):
                 setattr(self.config.thresholds, name, float(value))
         self.config.selected_profile()  # Validate profile/domain combination.
+        self.ptp_wire.expected_domain = self.config.selected_profile().domain
         self.config.allowed_grandmasters = sorted(
             {
                 value.strip().lower()

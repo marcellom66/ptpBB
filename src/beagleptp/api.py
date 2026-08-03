@@ -3,11 +3,21 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from importlib.resources import files
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -17,6 +27,10 @@ from .models import InstrumentMode
 
 class StartRequest(BaseModel):
     mode: Literal["analyzer", "grandmaster", "slave", "simulator"]
+
+
+class PoweroffRequest(BaseModel):
+    confirmation: Literal["SPEGNI"]
 
 
 class ThresholdRequest(BaseModel):
@@ -39,12 +53,29 @@ class ConfigurationRequest(BaseModel):
     thresholds: ThresholdRequest
 
 
+async def _loginctl_poweroff() -> None:
+    process = await asyncio.create_subprocess_exec("/usr/bin/loginctl", "poweroff")
+    return_code = await process.wait()
+    if return_code != 0:
+        raise RuntimeError(f"loginctl poweroff exited with status {return_code}")
+
+
 def create_app(
     engine: InstrumentEngine,
     api_token: str | None = None,
     initial_mode: InstrumentMode | None = None,
+    poweroff_handler: Callable[[], Awaitable[None]] | None = None,
+    allow_poweroff: bool | None = None,
+    poweroff_delay_seconds: float = 1.0,
 ) -> FastAPI:
     token = api_token if api_token is not None else os.getenv("BEAGLEPTP_API_TOKEN")
+    poweroff_enabled = (
+        allow_poweroff
+        if allow_poweroff is not None
+        else os.getenv("BEAGLEPTP_ALLOW_POWEROFF", "0") == "1"
+    )
+    perform_poweroff = poweroff_handler or _loginctl_poweroff
+    poweroff_scheduled = False
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -67,13 +98,19 @@ def create_app(
         if authorization is None or not hmac.compare_digest(authorization, expected):
             raise HTTPException(status_code=401, detail="invalid API token")
 
+    def instrument_status() -> dict[str, object]:
+        result = engine.status()
+        result["poweroff_available"] = poweroff_enabled and token is not None
+        result["poweroff_scheduled"] = poweroff_scheduled
+        return result
+
     @app.get("/", response_class=HTMLResponse)
     async def dashboard() -> str:
         return files("beagleptp.web").joinpath("index.html").read_text(encoding="utf-8")
 
     @app.get("/api/status")
     async def status(_: None = Depends(authorize)) -> dict[str, object]:
-        return engine.status()
+        return instrument_status()
 
     @app.get("/api/profiles")
     async def profiles(_: None = Depends(authorize)) -> dict[str, object]:
@@ -86,6 +123,10 @@ def create_app(
     @app.get("/api/gps")
     async def gps(_: None = Depends(authorize)) -> dict[str, object]:
         return engine.gps.snapshot()
+
+    @app.get("/api/ptp-time")
+    async def ptp_time(_: None = Depends(authorize)) -> dict[str, object]:
+        return engine.ptp_wire.snapshot()
 
     @app.get("/api/integrity")
     async def integrity(_: None = Depends(authorize)) -> dict[str, object]:
@@ -109,12 +150,48 @@ def create_app(
             await engine.start(InstrumentMode(body.mode))
         except (RuntimeError, ValueError, OSError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return engine.status()
+        return instrument_status()
 
     @app.post("/api/stop", status_code=202)
     async def stop(_: None = Depends(authorize)) -> dict[str, object]:
         await engine.stop()
-        return engine.status()
+        return instrument_status()
+
+    async def delayed_poweroff() -> None:
+        await asyncio.sleep(poweroff_delay_seconds)
+        await perform_poweroff()
+
+    @app.post("/api/system/poweroff", status_code=202)
+    async def poweroff(
+        body: PoweroffRequest,
+        background_tasks: BackgroundTasks,
+        _: None = Depends(authorize),
+    ) -> dict[str, object]:
+        del body  # Validation of the literal confirmation is the deliberate safety gate.
+        nonlocal poweroff_scheduled
+        if token is None:
+            raise HTTPException(
+                status_code=503,
+                detail="power-off requires BEAGLEPTP_API_TOKEN",
+            )
+        if not poweroff_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="power-off is disabled by service policy",
+            )
+        if poweroff_scheduled:
+            raise HTTPException(status_code=409, detail="power-off is already scheduled")
+        poweroff_scheduled = True
+        try:
+            await engine.stop()
+        except Exception:
+            poweroff_scheduled = False
+            raise
+        background_tasks.add_task(delayed_poweroff)
+        return {
+            "accepted": True,
+            "message": "Safe shutdown initiated; wait for all BeagleBone LEDs to turn off.",
+        }
 
     @app.get("/api/samples")
     async def samples(
@@ -156,14 +233,25 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.websocket("/api/live")
-    async def live(websocket: WebSocket, access_token: str | None = None) -> None:
-        if token is not None and (access_token is None or not hmac.compare_digest(access_token, token)):
-            await websocket.close(code=1008)
-            return
-        await websocket.accept()
+    async def live(websocket: WebSocket) -> None:
+        selected_protocol: str | None = None
+        if token is not None:
+            protocols = [
+                value.strip()
+                for value in websocket.headers.get("sec-websocket-protocol", "").split(",")
+            ]
+            if (
+                len(protocols) < 2
+                or protocols[0] != "beagleptp"
+                or not hmac.compare_digest(protocols[1], token)
+            ):
+                await websocket.close(code=1008)
+                return
+            selected_protocol = "beagleptp"
+        await websocket.accept(subprotocol=selected_protocol)
         queue = engine.subscribe()
         try:
-            await websocket.send_json({"type": "status", "data": engine.status()})
+            await websocket.send_json({"type": "status", "data": instrument_status()})
             while True:
                 outgoing = asyncio.create_task(queue.get())
                 incoming = asyncio.create_task(websocket.receive())
@@ -178,7 +266,10 @@ def create_app(
                     if event["type"] == "websocket.disconnect":
                         break
                 if outgoing in completed:
-                    await websocket.send_json(outgoing.result())
+                    message = outgoing.result()
+                    if message.get("type") == "status":
+                        message = {**message, "data": instrument_status()}
+                    await websocket.send_json(message)
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:

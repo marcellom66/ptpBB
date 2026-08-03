@@ -1,0 +1,9 @@
+// Permit only the dedicated BeaglePTP service account to request a normal
+// logind power-off. This does not grant arbitrary systemd or sudo access.
+polkit.addRule(function(action, subject) {
+    if (subject.user == "beagleptp" &&
+        (action.id == "org.freedesktop.login1.power-off" ||
+         action.id == "org.freedesktop.login1.power-off-multiple-sessions")) {
+        return polkit.Result.YES;
+    }
+});

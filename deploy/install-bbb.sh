@@ -12,7 +12,7 @@ install_dir=/opt/beagleptp
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     linuxptp ethtool python3 python3-venv python3-fastapi python3-uvicorn \
-    gpsd chrony pps-tools
+    gpsd chrony pps-tools polkitd
 
 if ! getent group beagleptp >/dev/null; then
     groupadd --system beagleptp
@@ -30,6 +30,11 @@ if ! "$install_dir/venv/bin/python" -c 'import fastapi, uvicorn' >/dev/null 2>&1
     mv "$install_dir/venv" "$install_dir/venv.incomplete.$(date +%s)"
     python3 -m venv --system-site-packages "$install_dir/venv"
 fi
+# Setuptools can otherwise reuse stale build/lib files when an existing device
+# installation is upgraded with a package that keeps the same version number.
+if [ -d "$project_dir/build" ]; then
+    find "$project_dir/build" -depth -delete
+fi
 "$install_dir/venv/bin/pip" install --no-build-isolation --no-deps "$project_dir"
 
 install -d -o beagleptp -g beagleptp -m 0750 /var/lib/beagleptp
@@ -41,8 +46,17 @@ if [ ! -e /etc/beagleptp/beagleptp.env ]; then
     chown root:beagleptp /etc/beagleptp/beagleptp.env
     echo "API token written to /etc/beagleptp/beagleptp.env"
 fi
+if grep -q '^BEAGLEPTP_ALLOW_POWEROFF=' /etc/beagleptp/beagleptp.env; then
+    sed -i 's/^BEAGLEPTP_ALLOW_POWEROFF=.*/BEAGLEPTP_ALLOW_POWEROFF=1/' \
+        /etc/beagleptp/beagleptp.env
+else
+    printf 'BEAGLEPTP_ALLOW_POWEROFF=1\n' >> /etc/beagleptp/beagleptp.env
+fi
 
 install -m 0644 "$project_dir/deploy/99-beagleptp.rules" /etc/udev/rules.d/99-beagleptp.rules
+install -d -m 0755 /etc/polkit-1/rules.d
+install -m 0644 "$project_dir/deploy/60-beagleptp-poweroff.rules" \
+    /etc/polkit-1/rules.d/60-beagleptp-poweroff.rules
 install -m 0644 "$project_dir/deploy/gpsd.default" /etc/default/gpsd
 if [ -e /etc/chrony/chrony.conf ] && [ ! -e /etc/chrony/chrony.conf.pre-beagleptp ]; then
     cp -a /etc/chrony/chrony.conf /etc/chrony/chrony.conf.pre-beagleptp
@@ -53,6 +67,8 @@ udevadm control --reload-rules
 udevadm trigger --subsystem-match=ptp
 systemctl daemon-reload
 systemctl enable --now gpsd.socket chrony.service
-systemctl enable --now beagleptp.service
+systemctl enable beagleptp.service
+# `enable --now` does not restart an already-running service during upgrades.
+systemctl restart beagleptp.service
 
 echo "BeaglePTP installed. Run: systemctl status beagleptp"
