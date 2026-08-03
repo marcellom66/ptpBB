@@ -15,6 +15,7 @@ def test_analyzer_is_free_running_and_client_only(tmp_path: Path) -> None:
     assert "clientOnly                   1" in rendered
     assert "serverOnly                   0" in rendered
     assert "free_running                 1" in rendered
+    assert "summary_interval             -4" in rendered
     assert f"uds_address                  {tmp_path / 'ptp4l'}" in rendered
 
 

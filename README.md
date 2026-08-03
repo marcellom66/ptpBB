@@ -274,6 +274,19 @@ beagleptp run slave --interface eth0 --profile default
 ```
 
 `ptp4l` disciplina il PHC e `phc2sys -a -r` disciplina `CLOCK_REALTIME`.
+La finestra `summary_interval` di `ptp4l` è impostata a 1/16 s così anche un
+master che trasmette Sync a 8 Hz produce campioni firmati `master offset`, non
+soltanto aggregati `rms`: la dashboard può quindi mostrare TE, delay, frequenza
+e stato d'integrità mentre il nodo è Slave.
+
+Su linuxptp 4.2 `phc2sys` crea il socket PMC client direttamente come
+`/var/run/phc2sys.<pid>.<indice>` anche quando `-z` indirizza il socket server
+di `ptp4l` in `/run/beagleptp`. L'unità systemd concede per questo
+`CAP_DAC_OVERRIDE` al solo utente di servizio confinato e rende `/run`
+scrivibile nel namespace del servizio. Senza queste impostazioni `ptp4l` può
+raggiungere lo stato `SLAVE` e sincronizzare il PHC, ma `phc2sys` termina con
+`uds: bind failed: Permission denied`, lasciando non sincronizzato il System
+UTC mostrato nella barra superiore.
 
 ### Grandmaster / generatore
 
@@ -619,10 +632,14 @@ L'unità `systemd` include:
   `beagleptp`.
 
 Le capability `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_NET_BIND_SERVICE`,
-`CAP_SYS_TIME` e `CAP_SYS_NICE` sono necessarie alle modalità PTP reali.
+`CAP_SYS_TIME`, `CAP_SYS_NICE` e, con linuxptp 4.2, `CAP_DAC_OVERRIDE` sono
+necessarie alle modalità PTP reali.
 `CAP_NET_BIND_SERVICE` consente all'utente non-root di aprire le porte UDP PTP
-privilegiate `319/320`; non concede accesso root generale. Ridurre ulteriormente
-le capability richiederebbe unità separate per Analyzer e Grandmaster.
+privilegiate `319/320`; `CAP_DAC_OVERRIDE` permette a `phc2sys` di creare il
+proprio socket PMC sotto `/var/run`, pur mantenendo il processo con l'utente
+dedicato e con `ProtectSystem`, `ProtectHome`, device policy e capability
+bounding set attivi. Ridurre ulteriormente le capability richiederebbe una
+versione linuxptp con socket client configurabile o unità privilegiate separate.
 
 ### Azioni ancora necessarie prima di una rete non fidata
 

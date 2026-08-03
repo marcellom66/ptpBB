@@ -32,6 +32,7 @@ class InstrumentEngine:
         self._load_persisted_config()
         self.mode = InstrumentMode.IDLE
         self.started_ns: int | None = None
+        self._started_monotonic: float | None = None
         self.session_started_ns: int | None = None
         self.samples: deque[PtpSample] = deque(maxlen=config.sample_retention)
         self.alarms: dict[str, Alarm] = {}
@@ -136,6 +137,7 @@ class InstrumentEngine:
                 raise ValueError("cannot start idle mode")
             self.mode = mode
             self.started_ns = time.time_ns()
+            self._started_monotonic = time.monotonic()
             self.session_started_ns = self.started_ns
             self._rejected_ptp_samples = 0
             self._last_rejected_ptp_sample = None
@@ -149,6 +151,7 @@ class InstrumentEngine:
             except Exception:
                 self.mode = InstrumentMode.IDLE
                 self.started_ns = None
+                self._started_monotonic = None
                 raise
             for code in (
                 "OFFSET_CRITICAL",
@@ -176,6 +179,7 @@ class InstrumentEngine:
             await self.backend.stop()
             self.mode = InstrumentMode.IDLE
             self.started_ns = None
+            self._started_monotonic = None
             await self._event("mode", f"stopped {previous.value}")
 
     async def close(self) -> None:
@@ -520,7 +524,11 @@ class InstrumentEngine:
             "mode": self.mode.value,
             "system_time_ns": now,
             "started_ns": self.started_ns,
-            "uptime_seconds": (now - self.started_ns) / 1e9 if self.started_ns else 0,
+            "uptime_seconds": (
+                time.monotonic() - self._started_monotonic
+                if self._started_monotonic is not None
+                else 0
+            ),
             "profile": asdict(self.config.selected_profile()),
             "domain_override": self.config.domain,
             "interface": self.config.interface,

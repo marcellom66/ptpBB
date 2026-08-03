@@ -27,6 +27,19 @@ async def test_simulator_end_to_end(tmp_path: Path) -> None:
     assert engine.mode == InstrumentMode.IDLE
 
 
+def test_uptime_uses_monotonic_clock_across_system_time_step(tmp_path: Path) -> None:
+    engine = InstrumentEngine(
+        InstrumentConfig(
+            database_path=str(tmp_path / "uptime.sqlite3"),
+            runtime_dir=str(tmp_path / "run"),
+        )
+    )
+    engine.started_ns = time.time_ns() + 300_000_000_000_000
+    engine._started_monotonic = time.monotonic() - 2.0
+    assert 1.9 < engine.status()["uptime_seconds"] < 2.1
+    engine.store.close()
+
+
 @pytest.mark.asyncio
 async def test_alarm_lifecycle(tmp_path: Path) -> None:
     engine = InstrumentEngine(

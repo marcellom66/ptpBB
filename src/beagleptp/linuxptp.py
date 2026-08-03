@@ -39,7 +39,10 @@ def render_ptp4l_config(
         f"serverOnly                   {1 if server_only else 0}",
         f"clientOnly                   {1 if client_only else 0}",
         f"free_running                 {1 if mode == InstrumentMode.ANALYZER else 0}",
-        "summary_interval             0",
+        # Keep the reporting window below common 8 Hz broadcast profiles so
+        # ptp4l emits signed ``master offset`` samples instead of aggregate
+        # ``rms`` lines. The latter do not contain a signed instantaneous TE.
+        "summary_interval             -4",
         "logging_level                6",
         "use_syslog                   0",
         "verbose                      1",
