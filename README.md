@@ -606,9 +606,11 @@ L'unità `systemd` include:
 - policy Polkit ristretta alle sole azioni logind di power-off per l'utente
   `beagleptp`.
 
-Le capability `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SYS_TIME` e `CAP_SYS_NICE`
-sono necessarie alle modalità PTP reali. Ridurle ulteriormente richiederebbe
-unità separate per Analyzer e Grandmaster.
+Le capability `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_NET_BIND_SERVICE`,
+`CAP_SYS_TIME` e `CAP_SYS_NICE` sono necessarie alle modalità PTP reali.
+`CAP_NET_BIND_SERVICE` consente all'utente non-root di aprire le porte UDP PTP
+privilegiate `319/320`; non concede accesso root generale. Ridurre ulteriormente
+le capability richiederebbe unità separate per Analyzer e Grandmaster.
 
 ### Azioni ancora necessarie prima di una rete non fidata
 

@@ -11,7 +11,10 @@ _SAMPLE = re.compile(
     r"\s+path delay\s+(?P<delay>[+-]?\d+(?:\.\d+)?)",
     re.IGNORECASE,
 )
-_STATE = re.compile(r"port\s+\d+:\s+\w+\s+to\s+(?P<state>\w+)", re.IGNORECASE)
+_STATE = re.compile(
+    r"port\s+\d+(?:\s+\([^)]+\))?:\s+\w+\s+to\s+(?P<state>\w+)",
+    re.IGNORECASE,
+)
 _MASTER = re.compile(r"selected best master clock\s+(?P<id>[0-9a-f.:-]+)", re.IGNORECASE)
 
 
